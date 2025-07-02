@@ -39,7 +39,7 @@ struct FWFCTileData
 	TSoftObjectPtr<UStaticMesh> TileMesh;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WFC Tile")
-	TArray<EWFCSocketType> Sockets;
+	TArray<EWFCSocketType> Sockets; //trbl
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WFC Tile")
 	ETileShape TileShape;
@@ -52,6 +52,7 @@ struct FWFCTileData
 		{
 			Sockets[i] = EWFCSocketType::Wall;
 		}
+		TileShape = ETileShape::Generic;
 	}
 };
 
@@ -90,17 +91,26 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WFC Settings")
 	int32 GridHeight;
 
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "WFC Settings")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WFC Settings")
+	float TileVisualScale;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WFC Settings")
+	int32 FallbackTileIndex;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WFC Settings")
 	TArray<FWFCTileData> AvailableTiles;
 
 	TArray<FWFCCell> GridCells; // index = y * GridWidth + x
+
+	UPROPERTY()
+	TArray<UStaticMeshComponent *> SpawnedMazeTiles;
 
 	// Core WFC Functions
 	UFUNCTION(CallInEditor, Category = "WFC Generation")
 	void GenerateMaze();
 
 	UFUNCTION(CallInEditor, Category = "WFC Generation")
-	void ClearMaze();
+	void ClearGeneratedMaze();
 
 protected:
 	int32 GetCellIndex(int32 X, int32 Y) const;
@@ -130,6 +140,5 @@ protected:
 	// visuals
 	void SpawnVisualTiles();
 
-	UPROPERTY()
-	TArray<UStaticMeshComponent *> SpawnedMazeTiles;
+	bool bGenerationSuccessful;
 };

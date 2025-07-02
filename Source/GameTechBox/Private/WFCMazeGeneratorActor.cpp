@@ -7,10 +7,14 @@
 AWFCMazeGeneratorActor::AWFCMazeGeneratorActor()
 {
  	// Set this actor to call Tick() every frame.  You can turn this off to improve performance if you don't need it.
-	PrimaryActorTick.bCanEverTick = true;
+	PrimaryActorTick.bCanEverTick = false;
 
 	GridWidth = 10;
 	GridHeight = 10;
+	TileVisualScale = 1.0f;
+	FallbackTileIndex = 0;
+
+	bGenerationSuccessful = false;
 }
 
 // Called when the game starts or when spawned
@@ -18,7 +22,7 @@ void AWFCMazeGeneratorActor::BeginPlay()
 {
 	Super::BeginPlay();
 
-	GenerateMaze();
+	//GenerateMaze();
 }
 
 int32 AWFCMazeGeneratorActor::GetCellIndex(int32 X, int32 Y) const
@@ -33,13 +37,41 @@ int32 AWFCMazeGeneratorActor::GetCellIndex(int32 X, int32 Y) const
 
 void AWFCMazeGeneratorActor::GenerateMaze()
 {
-	UE_LOG(LogTemp, Log, TEXT("Starting WFC Maze Generation..."));
-	ClearMaze();
+	UE_LOG(LogTemp, Log, TEXT("===== Starting WFC Maze Generation ====="));
+	ClearGeneratedMaze();
+
+	if(GridWidth <= 0 || GridHeight <= 0)
+	{
+		UE_LOG(LogTemp, Error, TEXT("Grid dimensions must be positive (Width: %d, Height %d)."), GridWidth, GridHeight);
+		return;
+	}
+	if(AvailableTiles.Num() == 0)
+	{
+		UE_LOG(LogTemp, Error, TEXT("No AvailableTiles defined! Please add tile definitions in Blueprint."));
+		return;
+	}
 
 	InitializeGrid();
 	RunWFC();
 	SpawnVisualTiles();
-	UE_LOG(LogTemp, Log, TEXT("WFC Maze Generation Complete."));
+	UE_LOG(LogTemp, Log, TEXT("===== WFC Maze Generation Complete ====="));
+}
+
+void AWFCMazeGeneratorActor::ClearGeneratedMaze()
+{
+	UE_LOG(LogTemp, Log, TEXT("Clearing previously generated maze..."));
+
+	for(UStaticMeshComponent *MeshComp : SpawnedMazeTiles)
+	{
+		if(IsValid(MeshComp))
+		{
+			MeshComp->UnregisterComponent();
+			MeshComp->DestroyComponent();
+		}
+	}
+	SpawnedMazeTiles.Empty();
+
+	UE_LOG(LogTemp, Log, TEXT("Finished clearing maze."));
 }
 
 void AWFCMazeGeneratorActor::InitializeGrid()
@@ -49,16 +81,28 @@ void AWFCMazeGeneratorActor::InitializeGrid()
 
 	for(int32 i = 0; i < GridCells.Num(); i++)
 	{
+		GridCells[i] = FWFCCell();
+
 		for(int32 TileIndex = 0; TileIndex < AvailableTiles.Num(); TileIndex++)
 		{
 			GridCells[i].PossibleTileIndices.Add(TileIndex);
 		}
+
+#ifdef UE_BUILD_DEBUG
+		if(i < 5)
+		{
+			UE_LOG(LogTemp, Log, TEXT("Cell %d initialized with %d possibilities. IsCollapsed: %s"), i, GridCells[i].PossibleTileIndices.Num(), (GridCells[i].IsCollapsed() ? TEXT("True") : TEXT("False")));
+		}
+#endif
+
 	}
-	UE_LOG(LogTemp, Log, TEXT("Grid Initialized with all possibilities."));
+	UE_LOG(LogTemp, Log, TEXT("Grid Initialized with all possibilities. AvailableTiles cound: %d"), AvailableTiles.Num());
 }
 
 void AWFCMazeGeneratorActor::RunWFC()
 {
+	bGenerationSuccessful = false;
+
 	const int32 MaxLoopIterations = GridWidth * GridHeight * AvailableTiles.Num() * 2;
 	int32 loopCount = 0;
 	while(loopCount < MaxLoopIterations)
@@ -98,13 +142,14 @@ void AWFCMazeGeneratorActor::RunWFC()
 		if(AllCollapsed)
 		{
 			UE_LOG(LogTemp, Log, TEXT("All cells collapsed. WFC Successful."));
+			bGenerationSuccessful = true;
 			break;
 		}
 	}
 
-	if(loopCount >= MaxLoopIterations)
+	if(!bGenerationSuccessful)
 	{
-		UE_LOG(LogTemp, Error, TEXT("WFC exceeded max iteration. Possible stuck position or unsolvable state."));
+		UE_LOG(LogTemp, Warning, TEXT("WFC failed to collapse all cells (Timeout or other issues) Max iterations reached: %d."), loopCount);
 	}
 }
 
@@ -246,11 +291,16 @@ bool AWFCMazeGeneratorActor::EnforceConstraints(int32 CellX, int32 CellY)
 	const bool bIsOnAnyEdge = bOnTopEdge || bOnBottomEdge || bOnLeftEdge || bOnRightEdge;
 
 
+	UE_LOG(LogTemp, Log, TEXT("Enforcing constraints for Cell (%d, %d0. Initial possibilities: %d"), CellX, CellY, CurrentCell.PossibleTileIndices.Num());
 	for(int32 PossibleTileIdx : CurrentCell.PossibleTileIndices)
 	{
 		bool bIsStillPossible = true;
 		const FWFCTileData &CurrentTileDef = AvailableTiles[PossibleTileIdx];
 
+		UE_LOG(LogTemp, Log, TEXT("    Checking Tile '%s' (Idx %d, Shape: %s) for Cell (%d, %d). Sockets: [T:%s, R:%s, B:%s, L:%s]"),
+			*CurrentTileDef.TileName, PossibleTileIdx, *UEnum::GetValueAsString(CurrentTileDef.TileShape), CellX, CellY,
+			*UEnum::GetValueAsString(CurrentTileDef.Sockets[0]), *UEnum::GetValueAsString(CurrentTileDef.Sockets[1]),
+			*UEnum::GetValueAsString(CurrentTileDef.Sockets[2]), *UEnum::GetValueAsString(CurrentTileDef.Sockets[3]));
 		// 1. Check Neighbors
 		for(int32 Direction = 0; Direction < 4; Direction++)
 		{
@@ -297,6 +347,8 @@ bool AWFCMazeGeneratorActor::EnforceConstraints(int32 CellX, int32 CellY)
 				if(!bFoundCompatibleNeighborTile)
 				{
 					bIsStillPossible = false;
+					UE_LOG(LogTemp, Log, TEXT("    Tile '%s' for Cell (%d, %d) removed: Incompatible with Neighbor (%d, %d) in Direction %d."),
+						*CurrentTileDef.TileName, CellX, CellY, NeighborX, NeighborY, Direction);
 					break;
 				}
 			}
@@ -307,165 +359,172 @@ bool AWFCMazeGeneratorActor::EnforceConstraints(int32 CellX, int32 CellY)
 			continue;
 		}
 
-		// 2: Apply Edge/Corner Rules
-		//if(bIsOnAnyEdge)
-		//{
-		//	if(bIsCorner)
-		//	{
-		//		if(CurrentTileDef.TileShape != ETileShape::Corner)
-		//		{
-		//			bIsStillPossible = false;
-		//		}
-		//		else
-		//		{
-		//			// brute force all combination
-		//			bool bCorrectCornerOrientation = false;
-		//			if(bOnTopEdge && bOnLeftEdge)
-		//			{
-		//				if(CurrentTileDef.Sockets[0] == EWFCSocketType::Wall &&
-		//					CurrentTileDef.Sockets[1] == EWFCSocketType::Path &&
-		//					CurrentTileDef.Sockets[2] == EWFCSocketType::Path &&
-		//					CurrentTileDef.Sockets[3] == EWFCSocketType::Wall)
-		//				{
-		//					bCorrectCornerOrientation = true;
-		//				}
-		//			}
-		//			else if(bOnTopEdge && bOnRightEdge)
-		//			{
-		//				if(CurrentTileDef.Sockets[0] == EWFCSocketType::Wall &&
-		//					CurrentTileDef.Sockets[1] == EWFCSocketType::Wall &&
-		//					CurrentTileDef.Sockets[2] == EWFCSocketType::Path &&
-		//					CurrentTileDef.Sockets[3] == EWFCSocketType::Path)
-		//				{
-		//					bCorrectCornerOrientation = true;
-		//				}
-		//			}
-		//			else if(bOnBottomEdge && bOnLeftEdge)
-		//			{
-		//				if(CurrentTileDef.Sockets[0] == EWFCSocketType::Path &&
-		//					CurrentTileDef.Sockets[1] == EWFCSocketType::Wall &&
-		//					CurrentTileDef.Sockets[2] == EWFCSocketType::Wall &&
-		//					CurrentTileDef.Sockets[3] == EWFCSocketType::Path)
-		//				{
-		//					bCorrectCornerOrientation = true;
-		//				}
-		//			}
-		//			else if(bOnBottomEdge && bOnRightEdge)
-		//			{
-		//				if(CurrentTileDef.Sockets[0] == EWFCSocketType::Wall &&
-		//					CurrentTileDef.Sockets[1] == EWFCSocketType::Path &&
-		//					CurrentTileDef.Sockets[2] == EWFCSocketType::Path &&
-		//					CurrentTileDef.Sockets[3] == EWFCSocketType::Wall)
-		//				{
-		//					bCorrectCornerOrientation = true;
-		//				}
-		//			}
+		//2: Apply Edge/Corner Rules
+		if(bIsOnAnyEdge)
+		{
+			UE_LOG(LogTemp, Log, TEXT("    Cell (%d, %d) is on an edge. Applying boundary rules for Tile '%s'."), CellX, CellY, *CurrentTileDef.TileName);
 
-		//			if(!bCorrectCornerOrientation)
-		//			{
-		//				bIsStillPossible = false;
-		//			}
-		//		}
-		//	}
-		//	else // Edge cells
-		//	{
-		//		if(!(CurrentTileDef.TileShape == ETileShape::Straight || CurrentTileDef.TileShape == ETileShape::TJunction))
-		//		{
-		//			bIsStillPossible = false;
-		//		}
-		//		else
-		//		{
-		//			bool bCorrectEdgeOrientation = false;
+			if(bIsCorner)
+			{
+				if(CurrentTileDef.TileShape != ETileShape::Corner)
+				{
+					bIsStillPossible = false;
+					UE_LOG(LogTemp, Warning, TEXT("    Tile '%s' for Cell (%d, %d) removed: Not a Corner shape for a corner cell"), *CurrentTileDef.TileName, CellX, CellY);
+				}
+				else
+				{
+					// brute force all combination
+					bool bCorrectCornerOrientation = false;
+					if(bOnTopEdge && bOnLeftEdge)
+					{
+						if(CurrentTileDef.Sockets[0] == EWFCSocketType::Wall &&
+							CurrentTileDef.Sockets[1] == EWFCSocketType::Path &&
+							CurrentTileDef.Sockets[2] == EWFCSocketType::Path &&
+							CurrentTileDef.Sockets[3] == EWFCSocketType::Wall)
+						{
+							bCorrectCornerOrientation = true;
+						}
+					}
+					else if(bOnTopEdge && bOnRightEdge)
+					{
+						if(CurrentTileDef.Sockets[0] == EWFCSocketType::Wall &&
+							CurrentTileDef.Sockets[1] == EWFCSocketType::Wall &&
+							CurrentTileDef.Sockets[2] == EWFCSocketType::Path &&
+							CurrentTileDef.Sockets[3] == EWFCSocketType::Path)
+						{
+							bCorrectCornerOrientation = true;
+						}
+					}
+					else if(bOnBottomEdge && bOnLeftEdge)
+					{
+						if(CurrentTileDef.Sockets[0] == EWFCSocketType::Path &&
+							CurrentTileDef.Sockets[1] == EWFCSocketType::Path &&
+							CurrentTileDef.Sockets[2] == EWFCSocketType::Wall &&
+							CurrentTileDef.Sockets[3] == EWFCSocketType::Wall)
+						{
+							bCorrectCornerOrientation = true;
+						}
+					}
+					else if(bOnBottomEdge && bOnRightEdge)
+					{
+						if(CurrentTileDef.Sockets[0] == EWFCSocketType::Wall &&
+							CurrentTileDef.Sockets[1] == EWFCSocketType::Path &&
+							CurrentTileDef.Sockets[2] == EWFCSocketType::Path &&
+							CurrentTileDef.Sockets[3] == EWFCSocketType::Wall)
+						{
+							bCorrectCornerOrientation = true;
+						}
+					}
 
-		//			if(CurrentTileDef.TileShape == ETileShape::Straight)
-		//			{
-		//				if(bOnTopEdge &&
-		//					CurrentTileDef.Sockets[0] == EWFCSocketType::Wall &&
-		//					CurrentTileDef.Sockets[1] == EWFCSocketType::Path &&
-		//					CurrentTileDef.Sockets[2] == EWFCSocketType::Wall &&
-		//					CurrentTileDef.Sockets[3] == EWFCSocketType::Path)
-		//				{
-		//					bCorrectEdgeOrientation = true;
-		//				}
-		//				else if(bOnBottomEdge &&
-		//					CurrentTileDef.Sockets[0] == EWFCSocketType::Wall &&
-		//					CurrentTileDef.Sockets[1] == EWFCSocketType::Path &&
-		//					CurrentTileDef.Sockets[2] == EWFCSocketType::Wall &&
-		//					CurrentTileDef.Sockets[3] == EWFCSocketType::Path)
-		//				{
-		//					bCorrectEdgeOrientation = true;
-		//				}
-		//				else if(bOnLeftEdge &&
-		//					CurrentTileDef.Sockets[0] == EWFCSocketType::Path &&
-		//					CurrentTileDef.Sockets[1] == EWFCSocketType::Wall &&
-		//					CurrentTileDef.Sockets[2] == EWFCSocketType::Path &&
-		//					CurrentTileDef.Sockets[3] == EWFCSocketType::Wall)
-		//				{
-		//					bCorrectEdgeOrientation = true;
-		//				}
-		//				else if(bOnRightEdge &&
-		//					CurrentTileDef.Sockets[0] == EWFCSocketType::Path &&
-		//					CurrentTileDef.Sockets[1] == EWFCSocketType::Wall &&
-		//					CurrentTileDef.Sockets[2] == EWFCSocketType::Path &&
-		//					CurrentTileDef.Sockets[3] == EWFCSocketType::Wall)
-		//				{
-		//					bCorrectEdgeOrientation = true;
-		//				}
-		//			}
-		//			else if(CurrentTileDef.TileShape == ETileShape::TJunction)
-		//			{
-		//				if(bOnTopEdge &&
-		//					CurrentTileDef.Sockets[0] == EWFCSocketType::Wall &&
-		//					CurrentTileDef.Sockets[1] == EWFCSocketType::Path &&
-		//					CurrentTileDef.Sockets[2] == EWFCSocketType::Path &&
-		//					CurrentTileDef.Sockets[3] == EWFCSocketType::Path)
-		//				{
-		//					bCorrectEdgeOrientation = true;
-		//				}
-		//				else if(bOnBottomEdge &&
-		//					CurrentTileDef.Sockets[0] == EWFCSocketType::Path &&
-		//					CurrentTileDef.Sockets[1] == EWFCSocketType::Path &&
-		//					CurrentTileDef.Sockets[2] == EWFCSocketType::Wall &&
-		//					CurrentTileDef.Sockets[3] == EWFCSocketType::Path)
-		//				{
-		//					bCorrectEdgeOrientation = true;
-		//				}
-		//				else if(bOnLeftEdge &&
-		//					CurrentTileDef.Sockets[0] == EWFCSocketType::Path &&
-		//					CurrentTileDef.Sockets[1] == EWFCSocketType::Path &&
-		//					CurrentTileDef.Sockets[2] == EWFCSocketType::Path &&
-		//					CurrentTileDef.Sockets[3] == EWFCSocketType::Wall)
-		//				{
-		//					bCorrectEdgeOrientation = true;
-		//				}
-		//				else if(bOnRightEdge &&
-		//					CurrentTileDef.Sockets[0] == EWFCSocketType::Path &&
-		//					CurrentTileDef.Sockets[1] == EWFCSocketType::Wall &&
-		//					CurrentTileDef.Sockets[2] == EWFCSocketType::Path &&
-		//					CurrentTileDef.Sockets[3] == EWFCSocketType::Path)
-		//				{
-		//					bCorrectEdgeOrientation = true;
-		//				}
-		//			}
-		//			else
-		//			{
-		//				bCorrectEdgeOrientation = false;
-		//			}
+					if(!bCorrectCornerOrientation)
+					{
+						bIsStillPossible = false;
+						UE_LOG(LogTemp, Warning, TEXT("    Tile '%s' for Cell(%d, %d) removed: Incorrect Corner orientation for this specific corner."), *CurrentTileDef.TileName, CellX, CellY);
+					}
+				}
+			}
+			else // Edge cells
+			{
+				if(!(CurrentTileDef.TileShape == ETileShape::Straight || CurrentTileDef.TileShape == ETileShape::TJunction))
+				{
+					bIsStillPossible = false;
+					UE_LOG(LogTemp, Warning, TEXT("    Tile '%s' for Cell (%d, %d) removed: Not Straight/TJunction for a non-corner edge cell"), *CurrentTileDef.TileName, CellX, CellY);
 
-		//			if(!bCorrectEdgeOrientation)
-		//			{
-		//				bIsStillPossible = false;
-		//			}
-		//		}
-		//	}
-		//}
+				}
+				else
+				{
+					bool bCorrectEdgeOrientation = false;
+
+					if(CurrentTileDef.TileShape == ETileShape::Straight)
+					{
+						if(bOnTopEdge &&
+							CurrentTileDef.Sockets[0] == EWFCSocketType::Wall &&
+							CurrentTileDef.Sockets[1] == EWFCSocketType::Path &&
+							CurrentTileDef.Sockets[2] == EWFCSocketType::Wall &&
+							CurrentTileDef.Sockets[3] == EWFCSocketType::Path)
+						{
+							bCorrectEdgeOrientation = true;
+						}
+						else if(bOnBottomEdge &&
+							CurrentTileDef.Sockets[0] == EWFCSocketType::Wall &&
+							CurrentTileDef.Sockets[1] == EWFCSocketType::Path &&
+							CurrentTileDef.Sockets[2] == EWFCSocketType::Wall &&
+							CurrentTileDef.Sockets[3] == EWFCSocketType::Path)
+						{
+							bCorrectEdgeOrientation = true;
+						}
+						else if(bOnLeftEdge &&
+							CurrentTileDef.Sockets[0] == EWFCSocketType::Path &&
+							CurrentTileDef.Sockets[1] == EWFCSocketType::Wall &&
+							CurrentTileDef.Sockets[2] == EWFCSocketType::Path &&
+							CurrentTileDef.Sockets[3] == EWFCSocketType::Wall)
+						{
+							bCorrectEdgeOrientation = true;
+						}
+						else if(bOnRightEdge &&
+							CurrentTileDef.Sockets[0] == EWFCSocketType::Path &&
+							CurrentTileDef.Sockets[1] == EWFCSocketType::Wall &&
+							CurrentTileDef.Sockets[2] == EWFCSocketType::Path &&
+							CurrentTileDef.Sockets[3] == EWFCSocketType::Wall)
+						{
+							bCorrectEdgeOrientation = true;
+						}
+					}
+					else if(CurrentTileDef.TileShape == ETileShape::TJunction)
+					{
+						if(bOnTopEdge &&
+							CurrentTileDef.Sockets[0] == EWFCSocketType::Wall &&
+							CurrentTileDef.Sockets[1] == EWFCSocketType::Path &&
+							CurrentTileDef.Sockets[2] == EWFCSocketType::Path &&
+							CurrentTileDef.Sockets[3] == EWFCSocketType::Path)
+						{
+							bCorrectEdgeOrientation = true;
+						}
+						else if(bOnBottomEdge &&
+							CurrentTileDef.Sockets[0] == EWFCSocketType::Path &&
+							CurrentTileDef.Sockets[1] == EWFCSocketType::Path &&
+							CurrentTileDef.Sockets[2] == EWFCSocketType::Wall &&
+							CurrentTileDef.Sockets[3] == EWFCSocketType::Path)
+						{
+							bCorrectEdgeOrientation = true;
+						}
+						else if(bOnLeftEdge &&
+							CurrentTileDef.Sockets[0] == EWFCSocketType::Path &&
+							CurrentTileDef.Sockets[1] == EWFCSocketType::Path &&
+							CurrentTileDef.Sockets[2] == EWFCSocketType::Path &&
+							CurrentTileDef.Sockets[3] == EWFCSocketType::Wall)
+						{
+							bCorrectEdgeOrientation = true;
+						}
+						else if(bOnRightEdge &&
+							CurrentTileDef.Sockets[0] == EWFCSocketType::Path &&
+							CurrentTileDef.Sockets[1] == EWFCSocketType::Wall &&
+							CurrentTileDef.Sockets[2] == EWFCSocketType::Path &&
+							CurrentTileDef.Sockets[3] == EWFCSocketType::Path)
+						{
+							bCorrectEdgeOrientation = true;
+						}
+					}
+					else
+					{
+						bCorrectEdgeOrientation = false;
+					}
+
+					if(!bCorrectEdgeOrientation)
+					{
+						bIsStillPossible = false;
+						UE_LOG(LogTemp, Warning, TEXT("    Tile '%s' for Cell(%d, %d) removed: Incorrect Straight/TJunctioni orientation for this specific edge."), *CurrentTileDef.TileName, CellX, CellY);
+					}
+				}
+			}
+		}
 
 		if(bIsStillPossible)
 		{
 			NewPossibilities.Add(PossibleTileIdx);
-			continue;
 		}
 	}
+	UE_LOG(LogTemp, Log, TEXT("Enforcing constraints for Cell (%d, %d). Final possibilities: %d"), CellX, CellY, NewPossibilities.Num());
 
 	bool bChanged = NewPossibilities.Num() != CurrentCell.PossibleTileIndices.Num();
 	CurrentCell.PossibleTileIndices = NewPossibilities;
@@ -485,15 +544,7 @@ bool AWFCMazeGeneratorActor::AreSocketsCompatible(EWFCSocketType Socket1, EWFCSo
 
 void AWFCMazeGeneratorActor::SpawnVisualTiles()
 {
-	TArray<AActor *> ChildActors;
-	GetAttachedActors(ChildActors);
-	for(AActor *Child : ChildActors)
-	{
-		Child->Destroy();
-	}
-
 	float TileSize = 100.0f;
-	int32 Scale = 2;
 	for(int32 Y = 0; Y < GridHeight; Y++)
 	{
 		for(int32 X = 0; X < GridWidth; X++)
@@ -505,46 +556,47 @@ void AWFCMazeGeneratorActor::SpawnVisualTiles()
 			}
 
 			const FWFCCell &Cell = GridCells[Index];
-			if(!Cell.IsCollapsed())
+			int32 TileToSpawnIndex = FallbackTileIndex;
+			
+			if(Cell.IsCollapsed())
 			{
-				continue;
+				TileToSpawnIndex = Cell.CollapsedTileIndex;
 			}
-			if(!AvailableTiles.IsValidIndex(Cell.CollapsedTileIndex))
+			else
 			{
+				if(Cell.GetEntropy() == 0)
+				{
+					UE_LOG(LogTemp, Error, TEXT("Cell (%d, %d) has 0 possibilities (contradiction) and will use Fallback Tile."), X, Y);
+				}
+				else
+				{
+					UE_LOG(LogTemp, Warning, TEXT("Cell (%d, %d) remains uncollapsed with %d possibilities and will use Fallback Tile."), X, Y, Cell.GetEntropy());
+				}
+			}
+
+			if(!AvailableTiles.IsValidIndex(TileToSpawnIndex))
+			{
+				UE_LOG(LogTemp, Error, TEXT("Tile index %d for cell (%d,%d) is out of bounds for AvailableTiles! Check Blueprint config and FallbackTileIndex."), TileToSpawnIndex, X, Y);
 				continue;
 			}
 
-			const FWFCTileData &TileData = AvailableTiles[Cell.CollapsedTileIndex];
+			const FWFCTileData &TileData = AvailableTiles[TileToSpawnIndex];
 			if(!TileData.TileMesh.IsValid())
 			{
-				UE_LOG(LogTemp, Warning, TEXT("Tile Mesh no valid for collapsed tile %d at (%d, %d)."), Cell.CollapsedTileIndex, X, Y);
+				UE_LOG(LogTemp, Error, TEXT("Mesh for Tile '%s' (Index %d) at (%d,%d) is not valid/loaded. Check Blueprint config."), *TileData.TileName, TileToSpawnIndex, X, Y);
 				continue;
 			}
 
 			UStaticMeshComponent *NewMesh = NewObject<UStaticMeshComponent>(this);
 			NewMesh->SetStaticMesh(TileData.TileMesh.LoadSynchronous());
-			NewMesh->SetWorldScale3D(FVector(Scale));
-			NewMesh->SetWorldLocation(GetActorLocation() + FVector(X * TileSize * Scale, Y * TileSize * Scale, 0.0f));
+
+			NewMesh->SetWorldLocation(GetActorLocation() + FVector(X * TileSize, Y * TileSize, 0.0f));
+			NewMesh->SetWorldScale3D(FVector(TileVisualScale));
+
 			NewMesh->SetupAttachment(GetRootComponent());
 			NewMesh->RegisterComponent();
+
 			SpawnedMazeTiles.Add(NewMesh);
 		}
 	}
-}
-
-void AWFCMazeGeneratorActor::ClearMaze()
-{
-	UE_LOG(LogTemp, Log, TEXT("Clearing previously generated maze..."));
-
-	for(UStaticMeshComponent *MeshComp : SpawnedMazeTiles)
-	{
-		if(IsValid(MeshComp))
-		{
-			MeshComp->UnregisterComponent();
-			MeshComp->DestroyComponent();
-		}
-	}
-	SpawnedMazeTiles.Empty();
-
-	UE_LOG(LogTemp, Log, TEXT("Finished clearing maze."));
 }
